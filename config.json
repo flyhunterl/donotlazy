@@ -1,0 +1,6 @@
+{
+    "max_record_days": 7,
+    "read_keyword": "已读",
+    "class_name": "3班",
+    "student_file": "students.json"
+} 
