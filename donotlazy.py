@@ -141,7 +141,8 @@ class DoNotLazy(Plugin):
                         group_id TEXT,
                         message_content TEXT,
                         create_time TEXT,
-                        create_date TEXT
+                        create_date TEXT,
+                        other_user_nickname TEXT
                     )
                 ''')
                 conn.commit()
@@ -268,7 +269,12 @@ class DoNotLazy(Plugin):
                     if not e_context["context"]["isgroup"]:
                         # 私聊中显示群组信息
                         for i, (name, time, record_group_id) in enumerate(today_students):
-                            group_display = f"[{record_group_id}]" if record_group_id != "私聊" else ""
+                            # 使用群名称替代群ID
+                            group_display = ""
+                            if record_group_id != "私聊":
+                                # 尝试从数据库或者其他方式获取群名称
+                                group_name = self._get_group_name(record_group_id)
+                                group_display = f"[{group_name}]"
                             result += f"{i+1}. {name}{group_display}（{time}）\n"
                         
                         # 今日统计（私聊模式下不显示未读人数，因为跨群了）
@@ -296,7 +302,11 @@ class DoNotLazy(Plugin):
                         result += f"日期：{date} - 总计{len(students)}人已读\n"
                         # 显示每个群的情况
                         for group_id, count in group_counts.items():
-                            group_display = f"[{group_id}]" if group_id != "私聊" else "[私聊]"
+                            if group_id != "私聊":
+                                group_name = self._get_group_name(group_id)
+                                group_display = f"[{group_name}]"
+                            else:
+                                group_display = "[私聊]"
                             result += f"  {group_display}: {count}人\n"
                     else:
                         # 群聊中只显示人数
@@ -391,7 +401,9 @@ class DoNotLazy(Plugin):
                             if name not in read_students:
                                 unread_students.append(name)
                         
-                        result += f"【群组: {group_id}】\n"
+                        # 获取群名称
+                        group_name = self._get_group_name(group_id)
+                        result += f"【群组: {group_name}】\n"
                         result += f"已读人数：{len(read_students)}人\n"
                         result += f"未读人数：{len(unread_students)}人\n"
                         
@@ -575,14 +587,29 @@ class DoNotLazy(Plugin):
                 time_str = now.strftime('%Y-%m-%d %H:%M:%S')
                 date_str = now.strftime('%Y-%m-%d')
                 
+                # 检查message_records表是否有other_user_nickname列
+                cursor.execute("PRAGMA table_info(message_records)")
+                columns = [info[1] for info in cursor.fetchall()]
+                
+                # 如果没有other_user_nickname列，则添加
+                if "other_user_nickname" not in columns:
+                    cursor.execute('''
+                        ALTER TABLE message_records 
+                        ADD COLUMN other_user_nickname TEXT
+                    ''')
+                    logger.info("[donotlazy] 已为message_records表添加other_user_nickname列")
+                
+                # 插入记录，包含群名称
                 cursor.execute('''
-                    INSERT INTO message_records (group_id, message_content, create_time, create_date)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO message_records 
+                    (group_id, message_content, create_time, create_date, other_user_nickname)
+                    VALUES (?, ?, ?, ?, ?)
                 ''', (
                     msg.other_user_id,
                     msg.content,
                     time_str,
-                    date_str
+                    date_str,
+                    msg.other_user_nickname
                 ))
                 conn.commit()
         except Exception as e:
@@ -722,4 +749,43 @@ class DoNotLazy(Plugin):
             reply.content = f"更新学生名单失败: {str(e)}"
         
         e_context["reply"] = reply
-        e_context.action = EventAction.BREAK_PASS 
+        e_context.action = EventAction.BREAK_PASS
+    
+    def _get_group_name(self, group_id):
+        """根据群ID获取群名称"""
+        try:
+            # 尝试从数据库获取群名称
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # 首先尝试从other_user_nickname字段中获取群名称
+                cursor.execute('''
+                    SELECT other_user_nickname 
+                    FROM message_records 
+                    WHERE group_id = ? AND other_user_nickname IS NOT NULL
+                    ORDER BY create_time DESC
+                    LIMIT 1
+                ''', (group_id,))
+                
+                result = cursor.fetchone()
+                if result and result[0]:
+                    return result[0]
+                
+                # 如果没有找到，尝试旧方法
+                cursor.execute('''
+                    SELECT DISTINCT other_user_nickname 
+                    FROM message_records 
+                    WHERE group_id = ? 
+                    LIMIT 1
+                ''', (group_id,))
+                
+                result = cursor.fetchone()
+                if result and result[0]:
+                    return result[0]
+            
+            # 如果找不到群名称，则返回群ID的前10个字符 + "..."
+            if len(group_id) > 10:
+                return group_id[:10] + "..."
+            return group_id
+        except Exception as e:
+            logger.error(f"[donotlazy] 获取群名称异常：{e}")
+            return group_id 
