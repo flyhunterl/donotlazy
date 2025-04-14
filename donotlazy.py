@@ -11,6 +11,7 @@ from channel.chat_message import ChatMessage
 from common.log import logger
 from plugins import *
 from config import conf
+import re
 
 
 @plugins.register(
@@ -179,8 +180,8 @@ class DoNotLazy(Plugin):
                 logger.info(f"[donotlazy] 群组 {msg.other_user_id} 不在白名单中，跳过处理")
                 return
         
-        # 查询已读同学
-        if content == "查询已读同学":
+        # 查询已读同学（普通查询和带日期查询）
+        if content == "查询已读同学" or content.startswith("查询已读同学 "):
             self._handle_query_read(e_context, msg)
         # 查询未读同学
         elif content == "查询未读同学":
@@ -222,18 +223,173 @@ class DoNotLazy(Plugin):
         reply.type = ReplyType.TEXT
         
         try:
-            # 获取查询日期范围（今天和7天前）
+            content = e_context["context"].content.strip()
+            logger.info(f"[donotlazy] 处理查询已读指令: {content}")
+            
+            # 检查是否有指定日期
+            specified_date = None
+            if content.startswith("查询已读同学 "):
+                date_str = content[7:].strip()
+                logger.info(f"[donotlazy] 检测到日期参数: '{date_str}'")
+                
+                # 支持多种日期格式，如"0413"或"04月13日"
+                if date_str:
+                    # 处理0413格式 - 更灵活的解析方式
+                    if len(date_str) == 4 and date_str.isdigit():
+                        month_str = date_str[:2]
+                        day_str = date_str[2:]
+                        
+                        # 处理月份前导零的情况（如"04"变成"4"）
+                        month_int = int(month_str)
+                        day_int = int(day_str)
+                        
+                        # 额外检查月份和日期合法性
+                        if month_int < 1 or month_int > 12:
+                            logger.error(f"[donotlazy] 月份无效: {month_int}")
+                            reply.content = f"月份应为1-12之间的数字，您输入的是 {month_int}"
+                            e_context["reply"] = reply
+                            e_context.action = EventAction.BREAK_PASS
+                            return
+                            
+                        max_days = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                        if day_int < 1 or day_int > max_days[month_int]:
+                            logger.error(f"[donotlazy] 日期无效: {month_int}月{day_int}日")
+                            reply.content = f"{month_int}月的日期应为1-{max_days[month_int]}之间的数字，您输入的是 {day_int}"
+                            e_context["reply"] = reply
+                            e_context.action = EventAction.BREAK_PASS
+                            return
+                        
+                        try:
+                            current_year = datetime.now().year
+                            date_obj = datetime(current_year, month_int, day_int)
+                            specified_date = date_obj.strftime('%Y-%m-%d')
+                            logger.info(f"[donotlazy] 成功解析日期参数: {date_str} -> {specified_date}")
+                        except ValueError as ve:
+                            logger.error(f"[donotlazy] 日期解析错误: {date_str}, 错误: {ve}")
+                            reply.content = f"日期格式错误: {str(ve)}"
+                            e_context["reply"] = reply
+                            e_context.action = EventAction.BREAK_PASS
+                            return
+                    
+                    # 处理04月13日格式
+                    elif "月" in date_str and "日" in date_str:
+                        try:
+                            month_part = date_str.split("月")[0]
+                            day_part = date_str.split("月")[1].split("日")[0]
+                            
+                            # 确保能解析为数字
+                            if not month_part.strip().isdigit() or not day_part.strip().isdigit():
+                                logger.error(f"[donotlazy] 月份或日期非数字: 月={month_part}, 日={day_part}")
+                                reply.content = f"月份和日期必须是数字"
+                                e_context["reply"] = reply
+                                e_context.action = EventAction.BREAK_PASS
+                                return
+                                
+                            month_int = int(month_part)
+                            day_int = int(day_part)
+                            
+                            # 额外检查月份和日期合法性
+                            if month_int < 1 or month_int > 12:
+                                logger.error(f"[donotlazy] 月份无效: {month_int}")
+                                reply.content = f"月份应为1-12之间的数字，您输入的是 {month_int}"
+                                e_context["reply"] = reply
+                                e_context.action = EventAction.BREAK_PASS
+                                return
+                                
+                            max_days = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                            if day_int < 1 or day_int > max_days[month_int]:
+                                logger.error(f"[donotlazy] 日期无效: {month_int}月{day_int}日")
+                                reply.content = f"{month_int}月的日期应为1-{max_days[month_int]}之间的数字，您输入的是 {day_int}"
+                                e_context["reply"] = reply
+                                e_context.action = EventAction.BREAK_PASS
+                                return
+                            
+                            current_year = datetime.now().year
+                            date_obj = datetime(current_year, month_int, day_int)
+                            specified_date = date_obj.strftime('%Y-%m-%d')
+                            logger.info(f"[donotlazy] 成功解析日期参数: {date_str} -> {specified_date}")
+                        except (ValueError, IndexError) as e:
+                            logger.error(f"[donotlazy] 日期解析错误: {date_str}, 错误: {str(e)}")
+                            reply.content = f"日期格式错误，请使用正确的日期格式，如'04月13日'"
+                            e_context["reply"] = reply
+                            e_context.action = EventAction.BREAK_PASS
+                            return
+                    
+                    # 尝试直接解析中文日期（比如"4月13日"没有前导零）
+                    elif re.match(r'^\d+月\d+日$', date_str):
+                        try:
+                            month_part = date_str.split("月")[0]
+                            day_part = date_str.split("月")[1].split("日")[0]
+                            
+                            month_int = int(month_part)
+                            day_int = int(day_part)
+                            
+                            # 额外检查月份和日期合法性
+                            if month_int < 1 or month_int > 12:
+                                logger.error(f"[donotlazy] 月份无效: {month_int}")
+                                reply.content = f"月份应为1-12之间的数字，您输入的是 {month_int}"
+                                e_context["reply"] = reply
+                                e_context.action = EventAction.BREAK_PASS
+                                return
+                                
+                            max_days = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                            if day_int < 1 or day_int > max_days[month_int]:
+                                logger.error(f"[donotlazy] 日期无效: {month_int}月{day_int}日")
+                                reply.content = f"{month_int}月的日期应为1-{max_days[month_int]}之间的数字，您输入的是 {day_int}"
+                                e_context["reply"] = reply
+                                e_context.action = EventAction.BREAK_PASS
+                                return
+                            
+                            current_year = datetime.now().year
+                            date_obj = datetime(current_year, month_int, day_int)
+                            specified_date = date_obj.strftime('%Y-%m-%d')
+                            logger.info(f"[donotlazy] 成功解析日期参数: {date_str} -> {specified_date}")
+                        except (ValueError, IndexError) as e:
+                            logger.error(f"[donotlazy] 日期解析错误: {date_str}, 错误: {str(e)}")
+                            reply.content = f"日期格式错误，请使用正确的日期格式，如'4月13日'"
+                            e_context["reply"] = reply
+                            e_context.action = EventAction.BREAK_PASS
+                            return
+                            
+                    # 尝试直接支持格式为"YYYY-MM-DD"的ISO日期格式
+                    elif re.match(r'^\d{4}-\d{1,2}-\d{1,2}$', date_str):
+                        try:
+                            parts = date_str.split('-')
+                            year = int(parts[0])
+                            month = int(parts[1])
+                            day = int(parts[2])
+                            
+                            date_obj = datetime(year, month, day)
+                            specified_date = date_obj.strftime('%Y-%m-%d')
+                            logger.info(f"[donotlazy] 成功解析ISO日期参数: {date_str} -> {specified_date}")
+                        except ValueError as ve:
+                            logger.error(f"[donotlazy] ISO日期解析错误: {date_str}, 错误: {ve}")
+                            reply.content = f"日期格式错误: {str(ve)}"
+                            e_context["reply"] = reply
+                            e_context.action = EventAction.BREAK_PASS
+                            return
+                    
+                    else:
+                        logger.error(f"[donotlazy] 不支持的日期格式: {date_str}")
+                        reply.content = f"不支持的日期格式。请使用如下格式之一：\n1. '0413'格式（表示4月13日）\n2. '04月13日'或'4月13日'格式\n3. '2025-04-13'格式"
+                        e_context["reply"] = reply
+                        e_context.action = EventAction.BREAK_PASS
+                        return
+            
+            # 获取查询日期
             today = datetime.now().strftime('%Y-%m-%d')
-            start_date = (datetime.now() - timedelta(days=self.max_record_days-1)).strftime('%Y-%m-%d')
+            query_date = specified_date if specified_date else today
+            logger.info(f"[donotlazy] 最终查询日期: {query_date}")
             
             group_id = msg.other_user_id if e_context["context"]["isgroup"] else "私聊"
             group_name = msg.other_user_nickname if e_context["context"]["isgroup"] else "私聊"
             
             # 记录请求日志
-            logger.info(f"[donotlazy] 查询已读同学, 群组ID: {group_id}, 群名: {group_name}, 日期范围: {start_date} 至 {today}")
+            logger.info(f"[donotlazy] 查询已读同学, 群组ID: {group_id}, 群名: {group_name}, 查询日期: {query_date}")
             
             # 检查学生名单是否为空
             if not self.students:
+                logger.warning("[donotlazy] 学生名单为空")
                 reply.content = f"未能加载学生名单，请检查配置。"
                 e_context["reply"] = reply
                 e_context.action = EventAction.BREAK_PASS
@@ -245,149 +401,114 @@ class DoNotLazy(Plugin):
                 cursor = conn.cursor()
                 
                 # 检查数据库是否有记录
-                cursor.execute("SELECT COUNT(*) FROM read_records")
+                cursor.execute("SELECT COUNT(*) FROM read_records WHERE create_date = ?", (query_date,))
                 total_records = cursor.fetchone()[0]
-                logger.info(f"[donotlazy] 数据库中共有 {total_records} 条已读记录")
+                logger.info(f"[donotlazy] 数据库中 {query_date} 共有 {total_records} 条已读记录")
                 
                 # 查询记录 - 在私聊中查询所有记录而不仅是私聊的记录
                 if e_context["context"]["isgroup"]:
                     # 群聊中只查询该群的记录
+                    logger.info(f"[donotlazy] 在群组中查询: {group_id}, 日期: {query_date}")
                     cursor.execute('''
-                        SELECT student_name, read_time, create_date, group_id
+                        SELECT student_name, read_time
                         FROM read_records
-                        WHERE group_id = ? AND create_date BETWEEN ? AND ?
-                        ORDER BY create_date DESC, read_time ASC
-                    ''', (group_id, start_date, today))
+                        WHERE group_id = ? AND create_date = ?
+                        ORDER BY read_time ASC
+                    ''', (group_id, query_date))
                 else:
                     # 私聊中查询所有记录
+                    logger.info(f"[donotlazy] 在私聊中查询所有群组, 日期: {query_date}")
                     cursor.execute('''
-                        SELECT student_name, read_time, create_date, group_id
+                        SELECT student_name, read_time, group_id
                         FROM read_records
-                        WHERE create_date BETWEEN ? AND ?
-                        ORDER BY create_date DESC, read_time ASC
-                    ''', (start_date, today))
+                        WHERE create_date = ?
+                        ORDER BY read_time ASC
+                    ''', (query_date,))
                 
                 records = cursor.fetchall()
-                logger.info(f"[donotlazy] 查询到 {len(records)} 条符合条件的记录")
+                logger.info(f"[donotlazy] 查询结果: 找到 {len(records)} 条符合条件的记录, 查询日期: {query_date}")
+                
+                # 仅用于调试 - 输出部分记录内容
+                if records and len(records) > 0:
+                    sample = records[0]
+                    logger.info(f"[donotlazy] 记录样例: {sample}")
             
             if not records:
-                reply.content = f"在 {start_date} 至 {today} 期间，{group_name} 没有记录到已读信息。"
+                date_display = "今日" if query_date == today else query_date
+                reply.content = f"{date_display}（{query_date}）{group_name} 没有记录到已读信息。\n\n如需查询其他日期，请输入「查询已读同学 格式为00月00日」，比如「查询已读同学 0413」"
+                logger.info(f"[donotlazy] 未找到记录，返回提示信息")
             else:
-                # 按日期分组
-                date_groups = {}
-                group_info = {}
-                
-                # 获取群组名称映射
-                if not e_context["context"]["isgroup"]:
-                    unique_group_ids = set(record[3] for record in records if record[3] != "私聊")
-                    for unique_id in unique_group_ids:
-                        group_info[unique_id] = "未知群组"  # 默认名称
-                
-                for record in records:
-                    student_name, read_time, create_date, record_group_id = record
-                    if create_date not in date_groups:
-                        date_groups[create_date] = []
-                    
-                    # 在私聊模式下，添加群组信息
-                    if not e_context["context"]["isgroup"]:
-                        date_groups[create_date].append((student_name, read_time, record_group_id))
-                    else:
-                        date_groups[create_date].append((student_name, read_time))
-                
                 # 构建回复内容
-                result = f"已读情况统计（{start_date} 至 {today}）\n\n"
+                date_display = "今日" if query_date == today else query_date
                 
-                # 先显示今天的已读情况
-                if today in date_groups:
-                    today_students = date_groups[today]
-                    result += f"今日（{today}）已读情况：\n"
-                    
-                    if not e_context["context"]["isgroup"]:
-                        # 私聊中显示群组信息
-                        for i, (name, time, record_group_id) in enumerate(today_students):
-                            # 使用群名称替代群ID
-                            group_display = ""
-                            if record_group_id != "私聊":
-                                # 尝试从数据库或者其他方式获取群名称
-                                group_name = self._get_group_name(record_group_id)
-                                group_display = f"[{group_name}]"
-                            
-                            # 标记不在名单中的用户
-                            name_display = name
-                            if name not in self.students:
-                                name_display = f"{name}(未在同学名单)"
-                                
-                            result += f"{i+1}. {name_display}{group_display}（{time}）\n"
-                        
-                        # 今日统计（私聊模式下不显示未读人数，因为跨群了）
-                        result += f"今日已读：{len(today_students)}人\n\n"
-                    else:
-                        # 群聊中的显示方式
-                        for i, (name, time) in enumerate(today_students):
-                            # 标记不在名单中的用户
-                            name_display = name
-                            if name not in self.students:
-                                name_display = f"{name}(未在同学名单)"
-                                
-                            result += f"{i+1}. {name_display}（{time}）\n"
-                        
-                        # 计算名单中的未读人数
-                        in_list_count = 0
-                        for name in self.students:
-                            if not any(student[0] == name for student in today_students):
-                                in_list_count += 1
-                        
-                        result += f"今日已读：{len(today_students)}人，未读：{in_list_count}人\n\n"
+                result = f"{date_display}（{query_date}）已读情况：\n\n"
                 
-                # 显示历史记录
-                result += "历史已读记录：\n"
-                for date, students in sorted(date_groups.items(), reverse=True):
-                    if date == today:  # 今天的已经显示过了
-                        continue
+                if not e_context["context"]["isgroup"]:
+                    # 私聊中按群组分类显示
+                    group_students = {}
+                    for record in records:
+                        name, read_time, record_group_id = record
+                        if record_group_id not in group_students:
+                            group_students[record_group_id] = []
+                        group_students[record_group_id].append((name, read_time))
                     
-                    if not e_context["context"]["isgroup"]:
-                        # 按日期和群组汇总
-                        group_students = {}
-                        for name, read_time, record_group_id in students:
-                            if record_group_id not in group_students:
-                                group_students[record_group_id] = []
-                            group_students[record_group_id].append((name, read_time))
+                    # 计算总人数
+                    total_read = len(records)
+                    result += f"总计已读：{total_read}人\n\n"
+                    
+                    # 按群组显示
+                    for group_id, student_list in group_students.items():
+                        if group_id != "私聊":
+                            group_name = self._get_group_name(group_id)
+                            group_display = f"[{group_name}]"
+                        else:
+                            group_display = "[私聊]"
+                        result += f"【{group_display}】: {len(student_list)}人\n"
                         
-                        result += f"日期：{date} - 总计{len(students)}人已读\n"
-                        # 显示每个群的情况，包括具体人名
-                        for group_id, student_list in group_students.items():
-                            if group_id != "私聊":
-                                group_name = self._get_group_name(group_id)
-                                group_display = f"[{group_name}]"
-                            else:
-                                group_display = "[私聊]"
-                            result += f"  {group_display}: {len(student_list)}人\n"
-                            
-                            # 显示具体的学生名单和阅读时间
-                            for i, (name, time) in enumerate(student_list):
-                                # 标记不在名单中的用户
-                                name_display = name
-                                if name not in self.students:
-                                    name_display = f"{name}(未在同学名单)"
-                                    
-                                result += f"    {i+1}. {name_display}（{time}）\n"
-                    else:
-                        # 群聊中显示具体人名
-                        result += f"日期：{date} - {len(students)}人已读\n"
-                        # 显示具体学生名单
-                        for i, (name, time) in enumerate(students):
+                        # 显示具体的学生名单和阅读时间
+                        for i, (name, time) in enumerate(student_list):
                             # 标记不在名单中的用户
                             name_display = name
                             if name not in self.students:
                                 name_display = f"{name}(未在同学名单)"
                                 
                             result += f"  {i+1}. {name_display}（{time}）\n"
+                        result += "\n"
+                    
+                else:
+                    # 群聊中直接显示已读学生列表
+                    for i, (name, time) in enumerate(records):
+                        # 标记不在名单中的用户
+                        name_display = name
+                        if name not in self.students:
+                            name_display = f"{name}(未在同学名单)"
+                            
+                        result += f"{i+1}. {name_display}（{time}）\n"
+                    
+                    # 计算名单中的未读人数
+                    in_list_count = 0
+                    for name in self.students:
+                        if not any(record[0] == name for record in records):
+                            in_list_count += 1
+                    
+                    result += f"\n已读：{len(records)}人，未读：{in_list_count}人"
+                
+                # 添加提示信息
+                result += "\n\n如需查询其他日期，请输入「查询已读同学 格式为00月00日」，比如「查询已读同学 0413」"
                 
                 reply.content = result.strip()
+                logger.info(f"[donotlazy] 成功生成已读查询回复，查询日期: {query_date}, 结果长度: {len(result)}")
         except Exception as e:
             logger.error(f"[donotlazy] 查询已读同学异常：{e}")
+            logger.exception(e)
             reply.content = f"查询失败：{str(e)}"
         
+        # 确保设置了回复内容并标记为已处理
+        if not reply.content:
+            reply.content = "处理查询请求时出现错误，请稍后再试。"
+            logger.error("[donotlazy] 回复内容为空，设置了默认错误信息")
+            
+        logger.info(f"[donotlazy] 最终回复内容: {reply.content[:50]}...")
         e_context["reply"] = reply
         e_context.action = EventAction.BREAK_PASS
     
